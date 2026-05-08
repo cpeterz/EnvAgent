@@ -1,0 +1,80 @@
+DEBUG: false
+
+PROXY: ""
+
+MODEL:
+  provider: OpenAICompatible
+  base_url: ${ENV.LLM_BASE_URL}
+  model: ${ENV.LLM_MODEL}
+  model_type: chat
+  auth:
+    api_key: ${ENV.LLM_API_KEY}
+  request_options:
+    temperature: 0.2
+
+SEARCH:
+  max_results: 10
+  timelimit: d
+  region: cn-zh
+  backend: auto
+  env_keywords_boost:
+    - "环境保护"
+    - "生态"
+    - "碳排放"
+    - "污染治理"
+    - "气候变化"
+    - "环保"
+
+RSS:
+  enabled: true
+  update_interval: 3600
+  sources:
+    - name: "生态环境部"
+      url: "https://www.mee.gov.cn/ywdt/hjywnews/index.shtml"
+      category: "政策法规"
+    - name: "中国环境报"
+      url: "https://www.cenews.com.cn/"
+      category: "行业动态"
+    - name: "UN Environment"
+      url: "https://www.unep.org/news-and-stories"
+      category: "国际动态"
+
+BROWSE:
+  enable_playwright: false
+  playwright_headless: true
+  response_mode: markdown
+  max_content_length: 12000
+  min_content_length: 80
+
+WORKFLOW:
+  max_column_num: 3
+  max_news_per_column: 4
+  output_language: Chinese
+  column_concurrency: 1
+  summary_concurrency: 3
+  default_topic: "今日环境新闻"
+
+OUTLINE:
+  use_customized: false
+  customized:
+    report_title: 今日环境新闻速递
+    column_list:
+      - column_title: 政策法规
+        column_requirement: 聚焦最新出台或即将出台的环境保护法规、政策、标准，包括碳排放交易、污染防治、生态保护红线等方面的政策动态。
+        search_keywords: 环保政策 环境法规 碳排放 生态保护
+      - column_title: 污染治理
+        column_requirement: 关注大气、水、土壤等污染治理进展，包括重点区域污染防治、环保督察、企业环保整改等。
+        search_keywords: 污染治理 大气污染 水污染 土壤污染 环保督察
+      - column_title: 气候变化
+        column_requirement: 跟踪全球气候变化、碳中和目标、新能源发展、极端天气事件等议题。
+        search_keywords: 气候变化 碳中和 新能源 极端天气 全球变暖
+      - column_title: 生态保护
+        column_requirement: 关注生物多样性保护、自然保护区建设、生态修复工程等生态文明建设动态。
+        search_keywords: 生态保护 生物多样性 自然保护区 生态修复
+
+OUTPUT:
+  directory: outputs
+
+WEB:
+  host: "0.0.0.0"
+  port: 8080

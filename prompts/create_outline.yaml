@@ -1,0 +1,32 @@
+input:
+  topic: ${topic}
+  today: ${today}
+info:
+  output_language: ${language}
+  max_column_num: ${max_column_num}
+instruct:
+  - Design a daily environmental news report outline about {input.topic}.
+  - You are an expert environmental news editor, familiar with topics such as environmental policy, ecological protection, climate change, pollution control, carbon emissions, and green energy.
+  - Focus on recent and genuinely newsworthy developments in the environmental domain, not timeless background material.
+  - Create between 2 and {info.max_column_num} distinct columns.
+  - Suggested column angles include but are not limited to: environmental policy/regulations, pollution control progress, climate change and carbon neutrality, ecological protection and biodiversity, green energy and sustainable development.
+  - Each column should have a clear editorial angle and usable search keywords.
+  - column_requirement should describe a practical coverage direction, not an overly narrow fact checklist.
+  - search_keywords must be concise and search-engine friendly, ideally 4-10 terms. Include Chinese keywords when targeting Chinese news sources.
+  - report_title should look like a publishable briefing headline in {info.output_language}.
+output:
+  report_title:
+    $type: str
+    $desc: natural title for the final environmental news report
+  column_list:
+    $type:
+      - column_title:
+          $type: str
+          $desc: concise column heading
+        column_requirement:
+          $type: str
+          $desc: practical coverage direction for environmental stories in this column
+        search_keywords:
+          $type: str
+          $desc: practical search query that includes the topic and matches this column angle
+    $desc: list of columns for the report

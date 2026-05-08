@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>环境新闻查询Agent</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <h1>环境新闻查询Agent</h1>
+            <p class="subtitle">AI驱动的环境新闻智能采集与分析平台</p>
+        </header>
+
+        <main class="app-main">
+            <div class="content-area">
+                <section class="query-section">
+                    <div class="query-form">
+                        <div class="input-group">
+                            <input type="text" id="topicInput" placeholder="输入环境新闻主题，如：碳排放政策、水污染治理..." value="">
+                            <select id="timeRange">
+                                <option value="d">最近一天</option>
+                                <option value="w">最近一周</option>
+                                <option value="m">最近一月</option>
+                            </select>
+                            <button id="collectBtn" onclick="startCollect()">开始采集</button>
+                        </div>
+                        <div class="quick-topics">
+                            <span class="label">热门主题:</span>
+                            <button class="topic-tag" onclick="setTopic('碳排放政策')">碳排放政策</button>
+                            <button class="topic-tag" onclick="setTopic('水污染治理')">水污染治理</button>
+                            <button class="topic-tag" onclick="setTopic('气候变化')">气候变化</button>
+                            <button class="topic-tag" onclick="setTopic('生物多样性保护')">生物多样性保护</button>
+                            <button class="topic-tag" onclick="setTopic('新能源发展')">新能源发展</button>
+                            <button class="topic-tag" onclick="setTopic('环保督察')">环保督察</button>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="progressSection" class="progress-section" style="display:none;">
+                    <h3>采集进度</h3>
+                    <div class="progress-bar-container">
+                        <div id="progressBar" class="progress-bar"></div>
+                    </div>
+                    <div id="progressLog" class="progress-log"></div>
+                </section>
+
+                <section id="reportSection" class="report-section" style="display:none;">
+                    <div class="report-header">
+                        <h3 id="reportTitle">报告</h3>
+                        <button class="btn-secondary" onclick="downloadReport()">下载Markdown</button>
+                    </div>
+                    <div id="reportContent" class="report-content"></div>
+                </section>
+            </div>
+
+            <aside class="sidebar">
+                <h3>历史报告</h3>
+                <div id="reportList" class="report-list">
+                    <p class="empty-hint">暂无历史报告</p>
+                </div>
+                <button class="btn-refresh" onclick="loadReports()">刷新列表</button>
+            </aside>
+        </main>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

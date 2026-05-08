@@ -1,0 +1,23 @@
+input: ${news_list}
+info:
+  column_title: ${column_title}
+  column_requirement: ${column_requirement}
+  language: ${language}
+instruct:
+  - Build the final environmental news column using the shortlisted stories.
+  - Keep the strongest non-duplicated stories only.
+  - prologue should be 2 to 3 sentences in {info.language}, providing an overview of the environmental trends or key developments in this column.
+  - When useful, cite key stories with Markdown links like [title](url).
+output:
+  prologue:
+    $type: str
+    $desc: opening paragraph for this environmental news column in {info.language}
+  news_list:
+    $type:
+      - id:
+          $type: int
+          $desc: value from {input.[].id}
+        recommend_comment:
+          $type: str
+          $desc: refined why-it-matters note for the selected environmental story
+    $desc: ordered list of stories to keep in the final column
