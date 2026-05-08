@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
+
+T = TypeVar("T")
 
 from agently import Agently, TriggerFlowRuntimeData
 
@@ -88,12 +91,23 @@ def require_rss_tool(data: TriggerFlowRuntimeData) -> RSSFeedToolProtocol:
     return cast(RSSFeedToolProtocol, data.require_resource("rss_tool"))
 
 
+async def run_with_timeout(coro, *, timeout: float, default: T) -> T:
+    task = asyncio.ensure_future(coro)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        return default
+    except Exception:
+        return default
+
+
 __all__ = [
     "EnvNewsChunkConfig",
     "create_editor_agent",
     "is_chinese_language",
     "safe_filename",
     "safe_int",
+    "run_with_timeout",
     "require_logger",
     "require_search_tool",
     "require_browse_tool",

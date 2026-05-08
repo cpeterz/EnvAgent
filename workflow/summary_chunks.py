@@ -12,6 +12,7 @@ from .common import (
     is_chinese_language,
     require_browse_tool,
     require_logger,
+    run_with_timeout,
     safe_int,
 )
 
@@ -212,7 +213,11 @@ def build_summary_candidates(
         seen_urls.add(url)
         candidates.append({"news": copy.deepcopy(news), "is_backup": False})
 
+    max_backups = config.settings.workflow.max_news_per_column
+    backup_count = 0
     for news in searched_news:
+        if backup_count >= max_backups:
+            break
         url = str(news.get("url") or "").strip()
         if not url or url in seen_urls or url in picked_urls:
             continue
@@ -223,6 +228,7 @@ def build_summary_candidates(
                 config, column_outline, backup_news,
             )
         candidates.append({"news": backup_news, "is_backup": True})
+        backup_count += 1
 
     return candidates
 
@@ -232,29 +238,29 @@ async def pick_news(
     column_outline: dict[str, Any],
     searched_news: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    try:
-        pick_results = await asyncio.wait_for(
-            create_editor_agent(kind="column")
-            .load_yaml_prompt(
-                config.prompt_dir / "pick_news.yaml",
-                mappings={
-                    "column_news": searched_news,
-                    "column_title": column_outline["column_title"],
-                    "column_requirement": column_outline["column_requirement"],
-                    "max_news_per_column": config.settings.workflow.max_news_per_column,
-                },
-            )
-            .async_start(
-                ensure_keys=[
-                    "[*].id",
-                    "[*].can_use",
-                    "[*].relevance_score",
-                    "[*].recommend_comment",
-                ]
-            ),
-            timeout=60,
+    pick_results = await run_with_timeout(
+        create_editor_agent(kind="column")
+        .load_yaml_prompt(
+            config.prompt_dir / "pick_news.yaml",
+            mappings={
+                "column_news": searched_news,
+                "column_title": column_outline["column_title"],
+                "column_requirement": column_outline["column_requirement"],
+                "max_news_per_column": config.settings.workflow.max_news_per_column,
+            },
         )
-    except (asyncio.TimeoutError, Exception):
+        .async_start(
+            ensure_keys=[
+                "[*].id",
+                "[*].can_use",
+                "[*].relevance_score",
+                "[*].recommend_comment",
+            ]
+        ),
+        timeout=60,
+        default=None,
+    )
+    if pick_results is None:
         return []
 
     if not isinstance(pick_results, list):
@@ -291,7 +297,11 @@ async def summarize_single_news(
     news: dict[str, Any],
 ) -> dict[str, Any] | None:
     logger.info("[Summarizing] %s", news["title"])
-    content = await browse_tool.browse(news["url"])
+    try:
+        content = await asyncio.wait_for(browse_tool.browse(news["url"]), timeout=20)
+    except (asyncio.TimeoutError, Exception):
+        logger.info("[Summarizing] Failed - browse timeout or error")
+        return None
     content = str(content or "").strip()
     if len(content) < config.settings.browse.min_content_length:
         logger.info("[Summarizing] Failed - content too short")
@@ -300,22 +310,22 @@ async def summarize_single_news(
         logger.info("[Summarizing] Failed - invalid browsed content")
         return None
 
-    try:
-        summary_result = await asyncio.wait_for(
-            create_editor_agent(kind="column")
-            .load_yaml_prompt(
-                config.prompt_dir / "summarize_news.yaml",
-                mappings={
-                    "news_content": content,
-                    "news_title": news["title"],
-                    "column_requirement": column_outline["column_requirement"],
-                    "language": config.settings.workflow.output_language,
-                },
-            )
-            .async_start(ensure_keys=["can_summarize", "summary"]),
-            timeout=45,
+    summary_result = await run_with_timeout(
+        create_editor_agent(kind="column")
+        .load_yaml_prompt(
+            config.prompt_dir / "summarize_news.yaml",
+            mappings={
+                "news_content": content,
+                "news_title": news["title"],
+                "column_requirement": column_outline["column_requirement"],
+                "language": config.settings.workflow.output_language,
+            },
         )
-    except (asyncio.TimeoutError, Exception):
+        .async_start(ensure_keys=["can_summarize", "summary"]),
+        timeout=45,
+        default=None,
+    )
+    if summary_result is None:
         logger.info("[Summarizing] Failed - timeout or error")
         return None
 

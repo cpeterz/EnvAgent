@@ -10,7 +10,7 @@ from agently import TriggerFlowRuntimeData
 
 from news_collector.markdown import render_markdown
 
-from .common import EnvNewsChunkConfig, create_editor_agent, require_logger, safe_filename
+from .common import EnvNewsChunkConfig, create_editor_agent, require_logger, run_with_timeout, safe_filename
 
 
 def create_prepare_request_chunk(
@@ -90,7 +90,7 @@ async def _generate_outline(
     config: EnvNewsChunkConfig,
     request: dict[str, Any],
 ) -> dict[str, Any]:
-    outline = await asyncio.wait_for(
+    outline = await run_with_timeout(
         create_editor_agent(kind="chief")
         .load_yaml_prompt(
             config.prompt_dir / "create_outline.yaml",
@@ -110,6 +110,7 @@ async def _generate_outline(
             ]
         ),
         timeout=60,
+        default=None,
     )
     if not isinstance(outline, dict):
         raise TypeError(f"Invalid outline result: {outline}")

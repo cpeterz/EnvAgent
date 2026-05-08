@@ -14,6 +14,7 @@ from .common import (
     require_logger,
     require_rss_tool,
     require_search_tool,
+    run_with_timeout,
     safe_int,
 )
 from .summary_chunks import pick_news
@@ -276,29 +277,27 @@ async def _write_column(
             "recommend_comment": news.get("recommend_comment", ""),
         })
 
-    try:
-        column_result = await asyncio.wait_for(
-            create_editor_agent(kind="column")
-            .load_yaml_prompt(
-                config.prompt_dir / "write_column.yaml",
-                mappings={
-                    "news_list": slimmed_news,
-                    "column_title": column_outline.get("column_title", ""),
-                    "column_requirement": column_outline.get("column_requirement", ""),
-                    "language": config.settings.workflow.output_language,
-                },
-            )
-            .async_start(
-                ensure_keys=[
-                    "prologue",
-                    "news_list[*].id",
-                    "news_list[*].recommend_comment",
-                ]
-            ),
-            timeout=60,
+    column_result = await run_with_timeout(
+        create_editor_agent(kind="column")
+        .load_yaml_prompt(
+            config.prompt_dir / "write_column.yaml",
+            mappings={
+                "news_list": slimmed_news,
+                "column_title": column_outline.get("column_title", ""),
+                "column_requirement": column_outline.get("column_requirement", ""),
+                "language": config.settings.workflow.output_language,
+            },
         )
-    except (asyncio.TimeoutError, Exception):
-        return _build_fallback_column(config, column_outline, summarized_news)
+        .async_start(
+            ensure_keys=[
+                "prologue",
+                "news_list[*].id",
+                "news_list[*].recommend_comment",
+            ]
+        ),
+        timeout=60,
+        default=None,
+    )
 
     if not isinstance(column_result, dict):
         return _build_fallback_column(config, column_outline, summarized_news)
