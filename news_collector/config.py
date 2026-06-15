@@ -238,7 +238,7 @@ class WorkflowConfig:
     max_news_per_column: int = 5
     output_language: str = "Chinese"
     column_concurrency: int = 3
-    summary_concurrency: int = 3
+    summary_concurrency: int = 1
     default_topic: str = "今日环境新闻"
 
     @classmethod

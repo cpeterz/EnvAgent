@@ -19,23 +19,31 @@ from .common import (
 )
 
 
-def create_prepare_summary_candidates_chunk(
+def create_summarize_column_chunk(
     config: EnvNewsChunkConfig,
 ) -> Callable[[TriggerFlowRuntimeData], Any]:
-    async def prepare_summary_candidates(data: TriggerFlowRuntimeData):
+    """Summarize a column's picked news in a single, self-contained async pass.
+
+    This intentionally avoids the previous event-driven loop (repeatedly
+    re-emitting ``Summary.Dispatch`` and re-running a nested ``for_each`` inside
+    a nested sub-flow), which could deadlock after a few iterations and stall
+    the whole run. Here we process candidates with bounded concurrency in a
+    plain ``while`` loop, stopping as soon as ``target_count`` summaries succeed.
+    """
+
+    async def summarize_column_news(data: TriggerFlowRuntimeData) -> dict[str, Any] | None:
         context = _coerce_summary_context(data.value)
         if context is None:
-            data.state.set("summary_context", None, emit=False)
-            data.state.set("summary_candidates", [], emit=False)
-            data.state.set("summary_cursor", 0, emit=False)
-            data.state.set("summary_results", [], emit=False)
-            data.state.set("summary_target_count", 0, emit=False)
-            await data.async_emit("Summary.Done", None)
-            return
+            return None
+
+        logger = require_logger(data)
+        browse_tool = require_browse_tool(data)
+        column_outline = context["column_outline"]
+        title = str(column_outline.get("column_title") or "").strip()
 
         candidates = build_summary_candidates(
             config,
-            context["column_outline"],
+            column_outline,
             context["searched_news"],
             context["picked_news"],
         )
@@ -44,144 +52,50 @@ def create_prepare_summary_candidates_chunk(
             config.settings.workflow.max_news_per_column,
         )
 
-        data.state.set("summary_context", copy.deepcopy(context), emit=False)
-        data.state.set("summary_candidates", candidates, emit=False)
-        data.state.set("summary_cursor", 0, emit=False)
-        data.state.set("summary_results", [], emit=False)
-        data.state.set("summary_target_count", target_count, emit=False)
+        summarized_news: list[dict[str, Any]] = []
+        if target_count > 0 and candidates:
+            concurrency = max(config.settings.workflow.summary_concurrency, 1)
+            cursor = 0
+            while len(summarized_news) < target_count and cursor < len(candidates):
+                batch_size = min(
+                    concurrency,
+                    target_count - len(summarized_news),
+                    len(candidates) - cursor,
+                )
+                batch = candidates[cursor : cursor + batch_size]
+                logger.info(
+                    "[Dispatch] cursor=%d batch=%d target=%d results=%d candidates=%d",
+                    cursor, batch_size, target_count, len(summarized_news), len(candidates),
+                )
+                cursor += batch_size
 
-        if target_count <= 0 or not candidates:
-            await data.async_emit("Summary.Done", None)
-        else:
-            await data.async_emit("Summary.Dispatch", None)
+                summaries = await asyncio.gather(
+                    *(
+                        summarize_single_news(
+                            config, logger, browse_tool, column_outline, candidate["news"],
+                        )
+                        for candidate in batch
+                    ),
+                    return_exceptions=True,
+                )
 
-    return prepare_summary_candidates
-
-
-def create_dispatch_summary_batch_chunk(
-    config: EnvNewsChunkConfig,
-) -> Callable[[TriggerFlowRuntimeData], Any]:
-    async def dispatch_summary_batch(data: TriggerFlowRuntimeData) -> list[dict[str, Any]]:
-        candidates = data.state.get("summary_candidates") or []
-        cursor = safe_int(data.state.get("summary_cursor"), 0)
-        target_count = safe_int(data.state.get("summary_target_count"), 0)
-        summary_results = data.state.get("summary_results") or []
-        if not isinstance(candidates, list) or not isinstance(summary_results, list):
-            raise RuntimeError("Invalid summary flow state.")
-
-        remaining_needed = target_count - len(summary_results)
-        batch_size = min(
-            max(config.settings.workflow.summary_concurrency, 1),
-            max(remaining_needed, 0),
-            len(candidates) - cursor,
-        )
-        require_logger(data).info(
-            "[Dispatch] cursor=%d batch=%d target=%d results=%d candidates=%d",
-            cursor, batch_size, target_count, len(summary_results), len(candidates),
-        )
-        if batch_size <= 0:
-            raise RuntimeError("Summary dispatch received no work.")
-
-        batch = candidates[cursor : cursor + batch_size]
-        data.state.set("summary_cursor", cursor + batch_size, emit=False)
-        return batch
-
-    return dispatch_summary_batch
-
-
-def create_summarize_candidate_chunk(
-    config: EnvNewsChunkConfig,
-) -> Callable[[TriggerFlowRuntimeData], Any]:
-    async def summarize_candidate(data: TriggerFlowRuntimeData) -> dict[str, Any]:
-        candidate = data.value if isinstance(data.value, dict) else {}
-        news = candidate.get("news")
-        is_backup = bool(candidate.get("is_backup"))
-        if not isinstance(news, dict):
-            return {"news": {}, "is_backup": is_backup, "summarized": None}
-
-        logger = require_logger(data)
-        column_outline = _get_summary_column_outline(data)
-        summarized = await summarize_single_news(
-            config, logger, require_browse_tool(data), column_outline, news,
-        )
-        return {
-            "news": copy.deepcopy(news),
-            "is_backup": is_backup,
-            "summarized": summarized,
-        }
-
-    return summarize_candidate
-
-
-def create_merge_summary_batch_chunk(
-    config: EnvNewsChunkConfig,
-) -> Callable[[TriggerFlowRuntimeData], Any]:
-    async def merge_summary_batch(data: TriggerFlowRuntimeData):
-        logger = require_logger(data)
-        results = data.value if isinstance(data.value, list) else []
-        summary_results = data.state.get("summary_results") or []
-        cursor = safe_int(data.state.get("summary_cursor"), 0)
-        candidates = data.state.get("summary_candidates") or []
-        target_count = safe_int(data.state.get("summary_target_count"), 0)
-
-        if not isinstance(summary_results, list) or not isinstance(candidates, list):
-            raise RuntimeError("Invalid summary merge state.")
-
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            news = item.get("news")
-            summarized = item.get("summarized")
-            is_backup = bool(item.get("is_backup"))
-            title = str(news.get("title") or "").strip() if isinstance(news, dict) else ""
-
-            if isinstance(summarized, dict):
-                summary_results.append(summarized)
-                continue
-            if is_backup:
-                logger.info("[Backup News Rejected] %s", title)
-            elif cursor < len(candidates):
-                logger.info("[Backup News Activated] %s", title)
-
-        data.state.set("summary_results", summary_results, emit=False)
-        if len(summary_results) >= target_count or cursor >= len(candidates):
-            logger.info(
-                "[Summary Loop Done] results=%d target=%d cursor=%d candidates=%d",
-                len(summary_results), target_count, cursor, len(candidates),
-            )
-            await data.async_emit("Summary.Done", None)
-        else:
-            logger.info(
-                "[Summary Loop Continue] results=%d target=%d cursor=%d candidates=%d",
-                len(summary_results), target_count, cursor, len(candidates),
-            )
-            await data.async_emit("Summary.Dispatch", None)
-
-    return merge_summary_batch
-
-
-def create_finalize_summary_chunk(
-    config: EnvNewsChunkConfig,
-) -> Callable[[TriggerFlowRuntimeData], Any]:
-    async def finalize_summary(data: TriggerFlowRuntimeData) -> dict[str, Any]:
-        context = data.state.get("summary_context")
-        if not isinstance(context, dict):
-            return {
-                "column_outline": {},
-                "searched_news": [],
-                "picked_news": [],
-                "summarized_news": [],
-            }
+                for candidate, summary in zip(batch, summaries):
+                    news_title = str(candidate["news"].get("title") or "").strip()
+                    if isinstance(summary, dict):
+                        summarized_news.append(summary)
+                    elif isinstance(summary, BaseException):
+                        logger.warning("[Summary Worker Error] %s: %s", news_title, summary)
+                    elif candidate.get("is_backup"):
+                        logger.info("[Backup News Rejected] %s", news_title)
+                    else:
+                        logger.info("[Backup News Activated] %s", news_title)
 
         result = copy.deepcopy(context)
-        summarized_news = data.state.get("summary_results") or []
-        result["summarized_news"] = summarized_news if isinstance(summarized_news, list) else []
-        logger = require_logger(data)
-        title = str(result.get("column_outline", {}).get("column_title") or "").strip()
-        logger.info("[Summarized News Count] %s => %s", title, len(result["summarized_news"]))
+        result["summarized_news"] = summarized_news
+        logger.info("[Summarized News Count] %s => %s", title, len(summarized_news))
         return result
 
-    return finalize_summary
+    return summarize_column_news
 
 
 def _coerce_summary_context(value: Any) -> dict[str, Any] | None:
@@ -197,13 +111,6 @@ def _coerce_summary_context(value: Any) -> dict[str, Any] | None:
         "searched_news": copy.deepcopy(searched_news),
         "picked_news": copy.deepcopy(picked_news),
     }
-
-
-def _get_summary_column_outline(data: TriggerFlowRuntimeData) -> dict[str, Any]:
-    context = data.state.get("summary_context")
-    if isinstance(context, dict) and isinstance(context.get("column_outline"), dict):
-        return context["column_outline"]
-    return {}
 
 
 def build_summary_candidates(
@@ -275,11 +182,8 @@ async def pick_news(
         default=None,
         label="pick_news",
     )
-    if pick_results is None:
-        return []
-
     if not isinstance(pick_results, list):
-        return []
+        return _fallback_pick_news(config, searched_news)
 
     picked_news = []
     seen_ids: set[int] = set()
@@ -301,7 +205,38 @@ async def pick_news(
         picked_news.append(picked_item)
         if len(picked_news) >= config.settings.workflow.max_news_per_column:
             break
+
+    if not picked_news:
+        return _fallback_pick_news(config, searched_news)
     return picked_news
+
+
+def _fallback_pick_news(
+    config: EnvNewsChunkConfig,
+    searched_news: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Degrade gracefully when the LLM shortlist fails or yields nothing.
+
+    The pick stage relies on structured LLM output, which can fail entirely
+    (e.g. the endpoint returns "No target data in response"). Rather than
+    dropping the whole column and producing an empty report, keep the top
+    candidates in their original search order so the summary stage can proceed.
+    """
+    fallback: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for index, news in enumerate(searched_news):
+        if not isinstance(news, dict):
+            continue
+        if index in seen_ids:
+            continue
+        seen_ids.add(index)
+        picked_item = copy.deepcopy(news)
+        picked_item.setdefault("recommend_comment", "")
+        picked_item["relevance_score"] = 0
+        fallback.append(picked_item)
+        if len(fallback) >= config.settings.workflow.max_news_per_column:
+            break
+    return fallback
 
 
 async def summarize_single_news(
@@ -549,10 +484,6 @@ def _is_invalid_browse_content(content: str) -> bool:
 
 
 __all__ = [
-    "create_prepare_summary_candidates_chunk",
-    "create_dispatch_summary_batch_chunk",
-    "create_summarize_candidate_chunk",
-    "create_merge_summary_batch_chunk",
-    "create_finalize_summary_chunk",
+    "create_summarize_column_chunk",
     "pick_news",
 ]
