@@ -111,6 +111,7 @@ async def _generate_outline(
         ),
         timeout=60,
         default=None,
+        label="generate_outline",
     )
     if not isinstance(outline, dict):
         raise TypeError(f"Invalid outline result: {outline}")

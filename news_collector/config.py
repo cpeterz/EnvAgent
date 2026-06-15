@@ -209,6 +209,8 @@ class BrowseConfig:
     response_mode: BrowseResponseMode = "markdown"
     max_content_length: int = 12000
     min_content_length: int = 80
+    summary_max_content_length: int = 6000
+    timeout: int = 15
     proxy: str | None = None
 
     @classmethod
@@ -222,6 +224,10 @@ class BrowseConfig:
             ),
             max_content_length=max(_as_int(block.get("max_content_length"), 12000), 2000),
             min_content_length=max(_as_int(block.get("min_content_length"), 80), 20),
+            summary_max_content_length=max(
+                _as_int(block.get("summary_max_content_length"), 6000), 1000
+            ),
+            timeout=max(_as_int(block.get("timeout"), 15), 1),
             proxy=_as_optional_str(block.get("proxy")),
         )
 

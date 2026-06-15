@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -91,13 +92,29 @@ def require_rss_tool(data: TriggerFlowRuntimeData) -> RSSFeedToolProtocol:
     return cast(RSSFeedToolProtocol, data.require_resource("rss_tool"))
 
 
-async def run_with_timeout(coro, *, timeout: float, default: T) -> T:
-    task = asyncio.ensure_future(coro)
+_diag_logger = logging.getLogger("env_news.diag")
+
+
+async def run_with_timeout(coro, *, timeout: float, default: T, label: str = "") -> T:
+    # NOTE: do NOT wrap `coro` in asyncio.shield here. wait_for must be able to
+    # cancel the underlying coroutine on timeout, otherwise the LLM/browse task
+    # keeps running orphaned and holds onto its network connection forever,
+    # which progressively stalls the whole flow.
+    start = time.monotonic()
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        _diag_logger.warning(
+            "[Timeout] %s exceeded %.0fs (waited %.1fs); task cancelled.",
+            label or "async-call", timeout, time.monotonic() - start,
+        )
         return default
-    except Exception:
+    except asyncio.CancelledError:
+        # Never swallow cancellation: re-raise so the surrounding for_each /
+        # gather can actually tear this task down instead of hanging on it.
+        raise
+    except Exception as exc:
+        _diag_logger.warning("[AsyncError] %s: %s", label or "async-call", exc)
         return default
 
 

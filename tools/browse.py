@@ -18,6 +18,7 @@ class AgentlyBrowseTool(BrowseToolProtocol):
             max_content_length=settings.browse.max_content_length,
             min_content_length=settings.browse.min_content_length,
             playwright_headless=settings.browse.playwright_headless,
+            timeout=settings.browse.timeout,
         )
 
     async def browse(self, url: str) -> str:

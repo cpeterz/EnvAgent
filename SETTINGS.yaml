@@ -45,6 +45,7 @@ BROWSE:
   response_mode: markdown
   max_content_length: 12000
   min_content_length: 80
+  summary_max_content_length: 6000
 
 WORKFLOW:
   max_column_num: 3

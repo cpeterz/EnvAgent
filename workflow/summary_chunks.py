@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
+import time
 from typing import Any, Callable
 
 from agently import TriggerFlowRuntimeData
@@ -73,6 +75,10 @@ def create_dispatch_summary_batch_chunk(
             max(remaining_needed, 0),
             len(candidates) - cursor,
         )
+        require_logger(data).info(
+            "[Dispatch] cursor=%d batch=%d target=%d results=%d candidates=%d",
+            cursor, batch_size, target_count, len(summary_results), len(candidates),
+        )
         if batch_size <= 0:
             raise RuntimeError("Summary dispatch received no work.")
 
@@ -139,8 +145,16 @@ def create_merge_summary_batch_chunk(
 
         data.state.set("summary_results", summary_results, emit=False)
         if len(summary_results) >= target_count or cursor >= len(candidates):
+            logger.info(
+                "[Summary Loop Done] results=%d target=%d cursor=%d candidates=%d",
+                len(summary_results), target_count, cursor, len(candidates),
+            )
             await data.async_emit("Summary.Done", None)
         else:
+            logger.info(
+                "[Summary Loop Continue] results=%d target=%d cursor=%d candidates=%d",
+                len(summary_results), target_count, cursor, len(candidates),
+            )
             await data.async_emit("Summary.Dispatch", None)
 
     return merge_summary_batch
@@ -259,6 +273,7 @@ async def pick_news(
         ),
         timeout=60,
         default=None,
+        label="pick_news",
     )
     if pick_results is None:
         return []
@@ -297,12 +312,26 @@ async def summarize_single_news(
     news: dict[str, Any],
 ) -> dict[str, Any] | None:
     logger.info("[Summarizing] %s", news["title"])
+    browse_start = time.monotonic()
     try:
         content = await asyncio.wait_for(browse_tool.browse(news["url"]), timeout=20)
-    except (asyncio.TimeoutError, Exception):
-        logger.info("[Summarizing] Failed - browse timeout or error")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[Summarizing] Failed - browse TIMEOUT after %.1fs | %s",
+            time.monotonic() - browse_start, news["url"],
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "[Summarizing] Failed - browse error after %.1fs: %s | %s",
+            time.monotonic() - browse_start, exc, news["url"],
+        )
         return None
     content = str(content or "").strip()
+    logger.info(
+        "[Browsed] %.1fs len=%d | %s",
+        time.monotonic() - browse_start, len(content), news["url"],
+    )
     if len(content) < config.settings.browse.min_content_length:
         logger.info("[Summarizing] Failed - content too short")
         return None
@@ -310,6 +339,14 @@ async def summarize_single_news(
         logger.info("[Summarizing] Failed - invalid browsed content")
         return None
 
+    content = _extract_main_content(
+        content,
+        news["title"],
+        config.settings.browse.summary_max_content_length,
+        config.settings.browse.min_content_length,
+    )
+
+    llm_start = time.monotonic()
     summary_result = await run_with_timeout(
         create_editor_agent(kind="column")
         .load_yaml_prompt(
@@ -324,14 +361,16 @@ async def summarize_single_news(
         .async_start(ensure_keys=["can_summarize", "summary"]),
         timeout=45,
         default=None,
+        label=f"summarize:{str(news['title'])[:24]}",
     )
+    logger.info("[Summary LLM] %.1fs | %s", time.monotonic() - llm_start, news["title"])
     if summary_result is None:
         logger.info("[Summarizing] Failed - timeout or error")
-        return None
+        return _build_brief_fallback(news, logger)
 
     if not isinstance(summary_result, dict):
         logger.info("[Summarizing] Failed - invalid summary output")
-        return None
+        return _build_brief_fallback(news, logger)
     if summary_result.get("can_summarize") is not True:
         logger.info("[Summarizing] Failed - model rejected content")
         return None
@@ -339,11 +378,142 @@ async def summarize_single_news(
     summary = str(summary_result.get("summary") or "").strip()
     if not summary:
         logger.info("[Summarizing] Failed - empty summary")
-        return None
+        return _build_brief_fallback(news, logger)
 
     summarized_news = copy.deepcopy(news)
     summarized_news["summary"] = summary
     logger.info("[Summarizing] Success")
+    return summarized_news
+
+
+# 噪声行关键词（导航、页脚、版权、登录注册等），命中且行较短则丢弃。
+_NOISE_KEYWORDS = (
+    "版权",
+    "copyright",
+    "all rights reserved",
+    "备案",
+    "icp",
+    "登录",
+    "注册",
+    "首页",
+    "上一篇",
+    "下一篇",
+    "相关阅读",
+    "相关推荐",
+    "扫一扫",
+    "分享到",
+    "responsible editor",
+    "编辑：",
+    "来源：",
+)
+
+
+def _title_terms(title: str) -> list[str]:
+    """从标题提取用于"正文相关行"判定的关键词。
+
+    英文等以空白/标点分词；中文标题（无空格）改用 2-4 字滑窗切词，
+    否则 ``term in line`` 对整条中文标题几乎不可能命中，导致标题保护失效。
+    """
+    normalized = re.sub(r"[，、,。.!！?？:：;；\s]+", " ", title).strip()
+    terms: set[str] = set()
+    for token in normalized.split(" "):
+        token = token.strip()
+        if not token:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", token):
+            # 含中日韩字符：用 2-4 字滑窗，捕获实体/机构等子串。
+            for size in (4, 3, 2):
+                if len(token) < size:
+                    continue
+                for i in range(len(token) - size + 1):
+                    terms.add(token[i : i + size])
+        elif len(token) >= 2:
+            terms.add(token.lower())
+    return [t for t in terms if t]
+
+
+def _extract_main_content(
+    content: str, title: str, max_chars: int, min_content_length: int
+) -> str:
+    """从浏览到的 markdown 内容中提取正文核心：纯 Python 去噪并按边界裁剪到 ``max_chars``。
+
+    不调用 LLM。若去噪后内容低于 ``min_content_length``，回退到对原始内容的边界截断，
+    避免误删导致内容过短被丢弃。
+    """
+    original = content.strip()
+    if len(original) <= max_chars:
+        # 内容本就不长，做一次轻量去噪但不强行裁剪；去噪后过短则透传原文。
+        cleaned = _clean_lines(original, title)
+        return cleaned if len(cleaned) >= min_content_length else original
+
+    cleaned = _clean_lines(original, title)
+    if len(cleaned) < min_content_length:
+        cleaned = original
+    return _truncate_on_boundary(cleaned, max_chars)
+
+
+def _clean_lines(content: str, title: str) -> str:
+    """逐行去噪：丢弃命中噪声关键词的短行与重复行，合并连续空行。
+
+    去重始终生效（含标题行）；标题相关行仅豁免"噪声关键词短行"过滤，避免误删正文标题。
+    """
+    title_terms = _title_terms(title)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            kept.append("")
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lowered = line.lower()
+        is_title_related = any(term in lowered for term in title_terms)
+        if not is_title_related and len(line) <= 40 and any(kw in lowered for kw in _NOISE_KEYWORDS):
+            continue
+        kept.append(line)
+
+    result_lines: list[str] = []
+    prev_blank = False
+    for line in kept:
+        blank = line == ""
+        if blank and prev_blank:
+            continue
+        result_lines.append(line)
+        prev_blank = blank
+    return "\n".join(result_lines).strip()
+
+
+def _truncate_on_boundary(content: str, max_chars: int) -> str:
+    """按段落/句子边界截断到 ``max_chars``，避免硬切句子。"""
+    if len(content) <= max_chars:
+        return content
+    window = content[:max_chars]
+    para_cut = window.rfind("\n\n")
+    if para_cut >= max_chars // 2:
+        return window[:para_cut].strip()
+    for sep in ("。", "！", "？", ".", "\n"):
+        cut = window.rfind(sep)
+        if cut >= max_chars // 2:
+            return window[: cut + 1].strip()
+    return window.strip()
+
+
+def _build_brief_fallback(news: dict[str, Any], logger) -> dict[str, Any] | None:
+    """LLM 摘要失败（超时/出错/空摘要）时，用搜索结果自带的 ``brief`` 降级生成摘要。
+
+    仅作"数量兜底"：避免整条新闻被丢弃。若无可用 ``brief``，返回 ``None`` 以维持
+    现有"调备用候选"逻辑。模型主动判定不相关（``can_summarize=False``）时不走此分支。
+    """
+    brief = _clean_lines(str(news.get("brief") or "").strip(), str(news.get("title") or ""))
+    if not brief:
+        return None
+    if len(brief) > 300:
+        brief = _truncate_on_boundary(brief, 300)
+    summarized_news = copy.deepcopy(news)
+    summarized_news["summary"] = brief
+    logger.info("[Summarizing] Fallback - using search brief")
     return summarized_news
 
 

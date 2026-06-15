@@ -297,6 +297,7 @@ async def _write_column(
         ),
         timeout=60,
         default=None,
+        label="write_column",
     )
 
     if not isinstance(column_result, dict):
